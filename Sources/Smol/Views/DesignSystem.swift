@@ -250,13 +250,23 @@ struct LineSlider: View {
 struct DimensionField: View {
     let prefix: String
     @Binding var value: Int
+    /// When set, the field can be cleared: empty means 0 and shows this word instead.
+    var emptyLabel: String?
 
     var body: some View {
         HStack(spacing: 6) {
             Text(prefix).font(.dsCaption).foregroundStyle(.tertiary)
-            TextField("", value: $value, format: .number.grouping(.never))
-                .textFieldStyle(.plain)
-                .font(.dsMono)
+            Group {
+                if let emptyLabel {
+                    TextField(emptyLabel, value: Binding<Int?>(
+                        get: { value > 0 ? value : nil },
+                        set: { value = max($0 ?? 0, 0) }), format: .number.grouping(.never))
+                } else {
+                    TextField("", value: $value, format: .number.grouping(.never))
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(.dsMono)
         }
         .padding(.horizontal, 8)
         .frame(height: 26)

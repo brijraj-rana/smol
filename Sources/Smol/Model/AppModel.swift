@@ -33,7 +33,10 @@ final class AppModel {
         }
     }
     var isExporting = false
+    var isExportingSet = false
     var toast: String?
+    /// Where paste and copy go. Only the DEBUG self-check points this anywhere else.
+    @ObservationIgnored var clipboard = NSPasteboard.general
 
     let watcher = FolderWatcher()
 
@@ -310,11 +313,7 @@ final class AppModel {
         var bytesIn: Int64 = 0, bytesOut: Int64 = 0
         for item in items where item.loadError == nil {
             guard let result = item.currentResult(settings) else { failed += 1; continue }
-            // Pasted images live in a temp folder; "next to originals" means Downloads for those.
-            var directory = folder ?? item.url.deletingLastPathComponent()
-            if folder == nil, directory.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
-                directory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? directory
-            }
+            let directory = folder ?? Self.folderBeside(item)
             let destination = FolderScanner.uniqueURL(in: directory, baseName: item.baseName + preferences.cleanSuffix,
                                                       fileExtension: settings.format.fileExtension)
             do {
@@ -333,6 +332,77 @@ final class AppModel {
         if failed > 0 { message += " · \(failed) failed" }
         showToast(message)
         if !saved.isEmpty && preferences.revealAfterSave { NSWorkspace.shared.activateFileViewerSelecting(saved) }
+    }
+
+    /// Pasted images live in a temp folder; "next to originals" means Downloads for those.
+    private static func folderBeside(_ item: ImageItem) -> URL {
+        let directory = item.url.deletingLastPathComponent()
+        guard directory.path.hasPrefix(FileManager.default.temporaryDirectory.path) else { return directory }
+        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? directory
+    }
+
+    // MARK: - Responsive set
+
+    /// Widths the set would get for `item`: nil while the typed list is not a list of widths.
+    func responsiveWidths(for item: ImageItem) -> [Int]? {
+        guard let requested = ResponsiveSet.parseWidths(preferences.responsiveWidths) else { return nil }
+        guard let width = item.info?.width else { return requested }
+        return ResponsiveSet.widths(requested, sourceWidth: width)
+    }
+
+    /// Saves the selected image once per width, wherever Settings says, and copies an `<img srcset>` tag.
+    func saveResponsiveSet() {
+        guard let item = selectedItem, item.loadError == nil, !isExportingSet else { return }
+        guard let widths = ResponsiveSet.parseWidths(preferences.responsiveWidths) else {
+            return showToast("Type widths like 640, 1280, 1920")
+        }
+        let folder: URL
+        switch preferences.destination {
+        case .besideOriginal:
+            folder = Self.folderBeside(item)
+        case .folder where preferences.folderURL != nil:
+            folder = preferences.folderURL!
+        case .ask, .folder:
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "Save Here"
+            panel.message = "Choose where to save the widths of \(item.name)"
+            guard panel.runModal() == .OK, let chosen = panel.url else { return }
+            folder = chosen
+        }
+        Task { await exportSet(item, widths: widths, to: folder) }
+    }
+
+    func exportSet(_ item: ImageItem, widths: [Int], to folder: URL, reveal: Bool = true) async {
+        isExportingSet = true
+        defer { isExportingSet = false }
+        let settings = self.settings
+        do {
+            let encoded = try await Self.encodeSetOffMain(url: item.url, widths: widths, settings: settings)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var saved: [URL] = []
+            var variants: [ResponsiveVariant] = []
+            for result in encoded {
+                let name = ResponsiveSet.baseName(item.baseName + preferences.cleanSuffix, width: result.width)
+                let destination = FolderScanner.uniqueURL(in: folder, baseName: name, fileExtension: settings.format.fileExtension)
+                try result.data.write(to: destination, options: .withoutOverwriting)
+                saved.append(destination)
+                variants.append(ResponsiveVariant(fileName: destination.lastPathComponent, width: result.width, height: result.height))
+            }
+            clipboard.clearContents()
+            clipboard.setString(ResponsiveSet.snippet(variants), forType: .string)
+            showToast("Saved \(saved.count) width\(saved.count == 1 ? "" : "s") · srcset tag copied")
+            if reveal && preferences.revealAfterSave { NSWorkspace.shared.activateFileViewerSelecting(saved) }
+        } catch {
+            showToast(error.localizedDescription)
+        }
+    }
+
+    nonisolated private static func encodeSetOffMain(url: URL, widths: [Int],
+                                                     settings: EncodeSettings) async throws -> [EncodedImage] {
+        try await ResponsiveSet.encode(ImageDecoder.decode(url: url), widths: widths, settings: settings)
     }
 
     /// A temp copy of the compressed file, so rows can be dragged straight into Finder, Slack, etc.
@@ -360,7 +430,7 @@ final class AppModel {
 
     /// Adds files copied in Finder, or raw image data (e.g. a screenshot copied with ⌃⇧⌘4).
     func pasteFromClipboard() {
-        let pasteboard = NSPasteboard.general
+        let pasteboard = clipboard
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self],
                                              options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
             add(urls: urls)
@@ -374,8 +444,12 @@ final class AppModel {
         }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("smol-paste")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let stamp = Date().formatted(.dateTime.hour().minute().second()).replacingOccurrences(of: ":", with: ".")
-        let file = FolderScanner.uniqueURL(in: dir, baseName: "Pasted \(stamp)", fileExtension: "png")
+        // A name that is safe in a URL, since pasted images often end up on a web page: pasted-142305.png
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HHmmss"
+        let stamp = formatter.string(from: Date())
+        let file = FolderScanner.uniqueURL(in: dir, baseName: "pasted-\(stamp)", fileExtension: "png")
         do {
             try png.write(to: file)
             add(urls: [file])
@@ -391,7 +465,7 @@ final class AppModel {
             showToast("Nothing to copy yet")
             return
         }
-        let pasteboard = NSPasteboard.general
+        let pasteboard = clipboard
         pasteboard.clearContents()
         pasteboard.writeObjects([file as NSURL])
         showToast("Copied \(file.lastPathComponent) · \(Format.bytes(result.byteCount))")

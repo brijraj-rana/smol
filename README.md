@@ -28,6 +28,9 @@
 - **Converts and compresses** to AVIF, WebP, JPEG XL, HEIC, JPEG, PNG, TIFF, GIF and BMP. Reads anything macOS can open, including RAW, PSD and HEIC.
 - **Shows you the difference.** A split view with the original on the left and the result on the right, with live file sizes.
 - **Hits a target size.** Ask for "under 200 KB" and Smol finds the best quality that fits.
+- **Resizes on the way out.** Scale by percent, or fit within a width, a height or both. It never enlarges unless you ask.
+- **Makes responsive sets.** One image becomes `hero-640w.webp`, `hero-1280w.webp` and `hero-1920w.webp`, and the `<img srcset sizes>` tag for them lands on your clipboard.
+- **Works from the clipboard.** Paste a screenshot with ⌘V, copy the compressed result back out.
 - **Watches a folder.** Point it at a folder and every new image is converted as it arrives.
 - **Stays out of the way.** Under 4 MB, no account, no upload. Everything happens on your Mac.
 - **Comes with a CLI** that uses the same engine, for scripts.
@@ -77,15 +80,33 @@ Smol notices newly installed encoders as soon as you switch back to it. Settings
 | Drop images or a folder on a dial segment | Convert to that format |
 | Drop on the center, or press ⌘O | Use the current format |
 | ← → then ↩, or 1–8 | Drive the dial from the keyboard |
-| ⇧⌘V | Paste an image or copied files from the clipboard |
+| ⌘V | Paste an image or copied files from the clipboard (⇧⌘V while typing in a field) |
+| Resize → Fit within | Cap the width, the height or both. Leave a side empty to cap only the other |
 | Drag the divider | Compare original and result |
 | Pinch, or ⌘-scroll | Zoom. ⌘0 fits, ⌘1 shows actual pixels |
 | ⌘S | Save everything to your chosen place |
-| ⇧⌘C | Copy the compressed image, ready to paste anywhere |
+| Copy next to the result, or ⇧⌘C | Copy the compressed image, ready to paste anywhere |
+| Save responsive set | Save the selected image at each width and copy its `<img srcset>` tag |
 | Drag a row out of the list | Drop the compressed file straight into Finder, Slack or Figma |
 | ⇧⌘F | Open Watch Folder |
 
 Where files go is up to you: ask each time, next to the originals, or one fixed folder. Set it under the Save button or in Settings. Smol never overwrites an existing file, and it always strips location and camera metadata while keeping the color profile.
+
+### Responsive sets
+
+Save responsive set writes the selected image once per width, in the current format and quality, and copies a tag like this:
+
+```html
+<img src="hero-1920w.webp"
+     srcset="hero-640w.webp 640w, hero-1280w.webp 1280w, hero-1920w.webp 1920w"
+     sizes="100vw" width="1920" height="1200" alt="">
+```
+
+The widths are 640, 1280 and 1920 unless you change them in Settings (⌘,). Widths larger than the image are skipped, so nothing is ever enlarged. An image smaller than every width is saved once at its own size.
+
+<p align="center">
+  <img src="docs/editor-resize.png" width="760" alt="The editor set to AVIF, fit within 1600 pixels wide, with the Save responsive set button">
+</p>
 
 <p align="center">
   <img src="docs/watch.png" width="49%" alt="Watch Folder">
@@ -98,8 +119,22 @@ Where files go is up to you: ask each time, next to the originals, or one fixed 
 smol photo.jpg -f avif -q 45
 smol hero.png -f webp --max-size 200kb
 smol ~/Downloads/convert -f avif -q 45 --resize 50% -o ~/Downloads/avif
+smol hero.png -f webp --resize 1600          # longest edge 1600, never enlarged
+smol hero.png -f avif --srcset | pbcopy      # 640, 1280 and 1920 wide, tag on the clipboard
 smol --help
 ```
+
+| Flag | Does |
+|---|---|
+| `--resize 50%` | Scale by percent |
+| `--resize 1600` | Cap the longest edge |
+| `--resize 1920x1080` | Fit within a box, keeping the aspect ratio |
+| `--resize 1600x` or `--resize x900` | Cap only the width, or only the height |
+| `--srcset` | Write one file per width (640, 1280, 1920) and print the `<img srcset>` tag |
+| `--widths 480,960,1440` | Choose the widths. Implies `--srcset` |
+| `--sizes "(min-width: 60em) 50vw, 100vw"` | Set the `sizes` attribute of the tag |
+
+With `--srcset`, progress goes to stderr and only the tag goes to stdout, so it can be piped or redirected.
 
 ## Design notes
 
@@ -122,7 +157,7 @@ Sources/
   SmolCore/    UI-free engine: formats, settings, decode, resize, encode, folder scanning
   Smol/        SwiftUI app: Model/ (state) and Views/ (dial, editor, compare, watch, settings)
   smol-cli/    command-line front end to SmolCore
-Tests/         engine tests (every format round-trips, target size, naming, edge cases)
+Tests/         engine tests (every format round-trips, target size, resize, responsive sets, naming, edge cases)
 scripts/       build-app.sh bundles the app; make-icon.swift draws the icon in code
 ```
 

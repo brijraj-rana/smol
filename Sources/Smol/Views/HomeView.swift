@@ -71,7 +71,7 @@ struct HomeView: View {
             }
             HStack(spacing: 6) {
                 Text("Paste").font(.dsCaption).foregroundStyle(.tertiary)
-                Keycap(text: "⇧⌘V")
+                Keycap(text: "⌘V")
             }
             HStack(spacing: 6) {
                 Text("Watch folder").font(.dsCaption).foregroundStyle(.tertiary)

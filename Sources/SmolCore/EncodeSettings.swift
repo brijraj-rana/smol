@@ -33,6 +33,28 @@ public struct ResizeOptions: Equatable, Codable, Sendable {
         self.allowUpscale = allowUpscale
     }
 
+    /// Parses `50%` (scale), `1920` (longest edge), `1920x1080` (fit within), `1920x` (width only) or `x1080` (height only).
+    public init?(spec: String) {
+        let text = spec.lowercased().trimmingCharacters(in: .whitespaces)
+        if text.hasSuffix("%") {
+            guard let percent = Double(text.dropLast()), percent > 0 else { return nil }
+            self.init(mode: .percent, percent: percent)
+            return
+        }
+        let parts = text.split(separator: "x", omittingEmptySubsequences: false).map(String.init)
+        if parts.count == 1, let edge = Int(parts[0]), edge > 0 {
+            self.init(mode: .fit, maxWidth: edge, maxHeight: edge)
+            return
+        }
+        guard parts.count == 2 else { return nil }
+        let width = parts[0].isEmpty ? 0 : Int(parts[0]) ?? -1
+        let height = parts[1].isEmpty ? 0 : Int(parts[1]) ?? -1
+        guard width >= 0, height >= 0, width + height > 0 else { return nil }
+        self.init(mode: .fit, maxWidth: width, maxHeight: height)
+    }
+
+    /// Output size for a source of `width` × `height`. In `fit` mode a limit of 0 means "any":
+    /// 1600 × 0 caps the width only, and the same number on both sides caps the longest edge.
     public func targetSize(width: Int, height: Int) -> (width: Int, height: Int) {
         guard width > 0, height > 0 else { return (width, height) }
         let scale: Double
@@ -42,7 +64,10 @@ public struct ResizeOptions: Equatable, Codable, Sendable {
         case .percent:
             scale = min(max(percent, 1), 400) / 100
         case .fit:
-            let s = min(Double(max(maxWidth, 1)) / Double(width), Double(max(maxHeight, 1)) / Double(height))
+            var limits: [Double] = []
+            if maxWidth > 0 { limits.append(Double(maxWidth) / Double(width)) }
+            if maxHeight > 0 { limits.append(Double(maxHeight) / Double(height)) }
+            guard let s = limits.min() else { return (width, height) }
             scale = allowUpscale ? s : min(s, 1)
         }
         return (max(1, Int((Double(width) * scale).rounded())), max(1, Int((Double(height) * scale).rounded())))
@@ -50,9 +75,13 @@ public struct ResizeOptions: Equatable, Codable, Sendable {
 
     public var summary: String {
         switch mode {
-        case .original: "original size"
-        case .percent: "\(Int(percent))%"
-        case .fit: "fit \(maxWidth)×\(maxHeight)"
+        case .original: return "original size"
+        case .percent: return "\(Int(percent))%"
+        case .fit:
+            if maxWidth > 0 && maxHeight > 0 { return "fit \(maxWidth)×\(maxHeight)" }
+            if maxWidth > 0 { return "fit \(maxWidth) wide" }
+            if maxHeight > 0 { return "fit \(maxHeight) tall" }
+            return "original size"
         }
     }
 }

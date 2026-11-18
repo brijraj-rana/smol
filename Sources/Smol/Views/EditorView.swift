@@ -192,7 +192,9 @@ struct InspectorView: View {
                 .padding(16)
             }
             .scrollIndicators(.never)
-            .contentMargins(.top, 0, for: .scrollContent)
+            // The inspector already insets its content below the toolbar; pull back a little of that
+            // so the result still fits above the buttons at the default window height.
+            .contentMargins(.top, -10, for: .scrollContent)
 
             VStack(spacing: 6) {
                 Button { model.saveAll() } label: {
@@ -205,6 +207,8 @@ struct InspectorView: View {
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(model.isExporting || model.items.isEmpty)
 
+                if let item = model.selectedItem { ResponsiveSetButton(item: item) }
+
                 DestinationMenu()
                     .foregroundStyle(.secondary)
             }
@@ -214,13 +218,50 @@ struct InspectorView: View {
     }
 }
 
+/// Saves the selected image once per width and copies the tag that uses them. Widths are set in Settings.
+private struct ResponsiveSetButton: View {
+    @Environment(AppModel.self) private var model
+    let item: ImageItem
+
+    var body: some View {
+        let widths = model.responsiveWidths(for: item)
+        Button { model.saveResponsiveSet() } label: {
+            HStack(spacing: 8) {
+                if model.isExportingSet { ProgressView().controlSize(.mini) }
+                Text(model.isExportingSet ? "Saving…" : "Save responsive set")
+                if let widths, !model.isExportingSet {
+                    Text("\(widths.count) width\(widths.count == 1 ? "" : "s")").opacity(0.5)
+                }
+            }
+        }
+        .buttonStyle(SecondaryButtonStyle())
+        .disabled(widths == nil || model.isExportingSet || item.loadError != nil)
+        .help(help(widths))
+    }
+
+    private func help(_ widths: [Int]?) -> String {
+        guard let widths else { return "Set the widths in Settings, like 640, 1280, 1920" }
+        let list = widths.map(String.init).joined(separator: ", ")
+        return "Saves \(item.name) at \(list) pixels wide and copies an img tag with srcset. Change the widths in Settings."
+    }
+}
+
 private struct ResultSummary: View {
+    @Environment(AppModel.self) private var model
     let item: ImageItem
     let settings: EncodeSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             SectionLabel("Result")
+                .overlay(alignment: .trailing) {
+                    Button("Copy") { model.copyCompressed(item) }
+                        .buttonStyle(QuietButtonStyle())
+                        .disabled(item.currentResult(settings) == nil)
+                        .opacity(item.currentResult(settings) == nil ? 0.4 : 1)
+                        .offset(x: 8)
+                        .help("Copy the compressed image  ⇧⌘C")
+                }
             if let result = item.currentResult(settings), let savings = item.savings(settings) {
                 Text(Format.savings(savings))
                     .font(.system(size: 30, weight: .light).monospacedDigit())
@@ -355,9 +396,9 @@ struct SettingsPanel: View {
                 LineSlider(value: $settings.resize.percent, range: 5...100, step: 5)
             case .fit:
                 HStack(spacing: 6) {
-                    DimensionField(prefix: "W", value: $settings.resize.maxWidth)
+                    DimensionField(prefix: "W", value: $settings.resize.maxWidth, emptyLabel: "any")
                     Text("×").font(.dsCaption).foregroundStyle(.tertiary)
-                    DimensionField(prefix: "H", value: $settings.resize.maxHeight)
+                    DimensionField(prefix: "H", value: $settings.resize.maxHeight, emptyLabel: "any")
                 }
                 FieldRow("Enlarge smaller images") { MiniSwitch(isOn: $settings.resize.allowUpscale) }
             }

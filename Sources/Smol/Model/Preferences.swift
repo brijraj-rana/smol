@@ -28,6 +28,8 @@ struct Preferences: Codable, Equatable {
     var suffix = ""
     var revealAfterSave = true
     var appearance: Appearance = .system
+    /// Widths for a responsive set, as typed: "640, 1280, 1920".
+    var responsiveWidths = "640, 1280, 1920"
 
     init() {}
 
@@ -39,6 +41,7 @@ struct Preferences: Codable, Equatable {
         suffix = try values.decodeIfPresent(String.self, forKey: .suffix) ?? ""
         revealAfterSave = try values.decodeIfPresent(Bool.self, forKey: .revealAfterSave) ?? true
         appearance = try values.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system
+        responsiveWidths = try values.decodeIfPresent(String.self, forKey: .responsiveWidths) ?? "640, 1280, 1920"
     }
 
     var folderURL: URL? { folderPath.map { URL(fileURLWithPath: $0) } }

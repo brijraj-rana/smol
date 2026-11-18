@@ -33,6 +33,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         Task { @MainActor in NSApp.appearance = AppModel.shared.preferences.appearance.nsAppearance }
+        // Plain ⌘V adds whatever image is on the clipboard, unless a text field wants the paste.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+            guard modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "v" else { return event }
+            let handled = MainActor.assumeIsolated {
+                guard NSApp.modalWindow == nil, !(NSApp.keyWindow?.firstResponder is NSText) else { return false }
+                AppModel.shared.pasteFromClipboard()
+                return true
+            }
+            return handled ? nil : event
+        }
     }
 
     /// Pick up encoders installed with Homebrew while the app was in the background.
@@ -42,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     #if DEBUG
     /// Dev aid: `SMOL_SNAPSHOT=/path/prefix SMOL_SCREENS=home,editor,watch .build/debug/Smol [images…]`
-    /// writes a PNG of the window for each screen, then quits.
+    /// writes a PNG of the window for each screen, then quits. The `check` screen runs `selfCheck` first.
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
         guard let prefix = env["SMOL_SNAPSHOT"] else { return }
@@ -63,6 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     window.title = "Settings"
                     window.styleMask = [.titled, .closable]
                     window.makeKeyAndOrderFront(nil)
+                case "check":
+                    await Self.selfCheck(model, sample: files.first, folder: URL(fileURLWithPath: "\(prefix)-check"))
                 default: model.screen = .home
                 }
                 try? await Task.sleep(for: .seconds(screen == "editor" ? Double(env["SMOL_WAIT"] ?? "4") ?? 4 : 1.5))
@@ -76,6 +89,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             NSApp.terminate(nil)
         }
+    }
+
+    /// Drives paste, copy and the responsive set on a private pasteboard, so the real clipboard is left alone.
+    /// Prints what happened; the snapshot that follows shows the pasted image in the editor.
+    @MainActor private static func selfCheck(_ model: AppModel, sample: URL?, folder: URL) async {
+        func report(_ line: String) { FileHandle.standardError.write(Data("check: \(line)\n".utf8)) }
+        guard let sample, let image = NSImage(contentsOf: sample) else { return report("needs an image argument") }
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        model.clipboard = board
+        model.removeAll()
+        board.clearContents()
+        board.writeObjects([image])
+        if let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                                      windowNumber: NSApp.windows.first?.windowNumber ?? 0, context: nil,
+                                      characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9) {
+            NSApp.postEvent(key, atStart: false)
+        }
+        try? await Task.sleep(for: .seconds(3))
+        report("⌘V added \(model.items.count) image(s): \(model.items.map(\.name))")
+        guard let item = model.selectedItem else { return }
+        model.copyCompressed()
+        let copied = (board.readObjects(forClasses: [NSURL.self]) as? [URL])?.map(\.lastPathComponent) ?? []
+        report("copy put \(copied) on the pasteboard")
+        await model.exportSet(item, widths: ResponsiveSet.defaultWidths, to: folder, reveal: false)
+        report("set wrote \(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).sorted())")
+        report("tag:\n\(board.string(forType: .string) ?? "none")")
     }
     #endif
 }

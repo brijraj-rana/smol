@@ -14,7 +14,12 @@ OPTIONS
   -q, --quality <1-100>   lossy quality                                      (default: 75)
       --max-size <size>   pick the quality automatically to fit, e.g. 200kb or 1.5mb
       --lossless          lossless WebP / JPEG XL
-      --resize <spec>     50%  or  1920x1080 (fit within, keeps aspect ratio)
+      --resize <spec>     50%, 1920 (longest edge), 1920x1080 (fit within),
+                          1600x (width only) or x900 (height only). Never enlarges.
+      --srcset            responsive set: one file per width (640, 1280, 1920),
+                          named photo-640w.webp, and an <img srcset> tag on stdout
+      --widths <list>     widths for the set, e.g. 480,960,1440 (implies --srcset)
+      --sizes <value>     sizes attribute for the tag                        (default: 100vw)
       --effort <level>    fast, balanced, best                               (default: balanced)
   -o, --output <folder>   write here instead of next to each original
       --overwrite         replace existing files instead of writing "name 2.ext"
@@ -24,6 +29,8 @@ EXAMPLES
   smol photo.jpg -f avif -q 45
   smol ~/Downloads/convert -f avif -q 45 --resize 50% -o ~/Downloads/avif
   smol hero.png -f webp --max-size 200kb
+  smol hero.png -f webp --resize 1600
+  smol hero.png -f avif --srcset | pbcopy
 """
 
 func fail(_ message: String) -> Never {
@@ -45,6 +52,8 @@ var settings = EncodeSettings()
 var inputs: [URL] = []
 var outputFolder: URL?
 var overwrite = false
+var setWidths: [Int]?
+var sizes = ResponsiveSet.defaultSizes
 
 var arguments = Array(CommandLine.arguments.dropFirst())
 func nextValue(for flag: String) -> String {
@@ -75,14 +84,17 @@ while !arguments.isEmpty {
         guard let effort = Effort(rawValue: nextValue(for: argument).lowercased()) else { fail("effort must be fast, balanced or best") }
         settings.effort = effort
     case "--resize":
-        let spec = nextValue(for: argument).lowercased()
-        if spec.hasSuffix("%"), let percent = Double(spec.dropLast()), percent > 0 {
-            settings.resize = ResizeOptions(mode: .percent, percent: percent)
-        } else {
-            let parts = spec.split(separator: "x").compactMap { Int($0) }
-            guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { fail("--resize expects 50% or 1920x1080") }
-            settings.resize = ResizeOptions(mode: .fit, maxWidth: parts[0], maxHeight: parts[1])
+        guard let resize = ResizeOptions(spec: nextValue(for: argument)) else {
+            fail("--resize expects 50%, 1920, 1920x1080, 1600x or x900")
         }
+        settings.resize = resize
+    case "--srcset":
+        setWidths = setWidths ?? ResponsiveSet.defaultWidths
+    case "--widths":
+        guard let widths = ResponsiveSet.parseWidths(nextValue(for: argument)) else { fail("--widths expects something like 640,1280,1920") }
+        setWidths = widths
+    case "--sizes":
+        sizes = nextValue(for: argument)
     case "-o", "--output":
         outputFolder = URL(fileURLWithPath: (nextValue(for: argument) as NSString).expandingTildeInPath)
     case "--overwrite":
@@ -117,18 +129,25 @@ struct Outcome: Sendable {
     let message: String
 }
 
+/// Writes `data` as `base.ext` in `folder` and returns where it went.
+func write(_ data: Data, base: String, format: OutputFormat, folder: URL, source: URL, overwrite: Bool) throws -> URL {
+    var destination = folder.appendingPathComponent(base).appendingPathExtension(format.fileExtension)
+    // Never clobber the source, and never clobber anything else unless asked.
+    if !overwrite || destination.standardizedFileURL == source.standardizedFileURL {
+        destination = FolderScanner.uniqueURL(in: folder, baseName: base, fileExtension: format.fileExtension)
+    }
+    try data.write(to: destination, options: .atomic)
+    return destination
+}
+
 func convert(_ file: URL, settings: EncodeSettings, outputFolder: URL?, overwrite: Bool) async -> Outcome {
     let inputSize = Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
     do {
         let encoded = try await ImageEncoder.encode(url: file, settings: settings)
         let folder = outputFolder ?? file.deletingLastPathComponent()
         let base = file.deletingPathExtension().lastPathComponent
-        var destination = folder.appendingPathComponent(base).appendingPathExtension(settings.format.fileExtension)
-        // Never clobber the source, and never clobber anything else unless asked.
-        if !overwrite || destination.standardizedFileURL == file.standardizedFileURL {
-            destination = FolderScanner.uniqueURL(in: folder, baseName: base, fileExtension: settings.format.fileExtension)
-        }
-        try encoded.data.write(to: destination, options: .atomic)
+        let destination = try write(encoded.data, base: base, format: settings.format, folder: folder,
+                                    source: file, overwrite: overwrite)
         let saved = inputSize > 0 ? Int((1 - Double(encoded.byteCount) / Double(inputSize)) * 100) : 0
         return Outcome(name: file.lastPathComponent, input: inputSize, output: encoded.byteCount,
                        message: "\(bytes(inputSize)) → \(bytes(encoded.byteCount))  \(saved >= 0 ? "−" : "+")\(abs(saved))%  \(destination.lastPathComponent)")
@@ -137,9 +156,55 @@ func convert(_ file: URL, settings: EncodeSettings, outputFolder: URL?, overwrit
     }
 }
 
+/// One image at several widths. The outcome carries the tag for stdout.
+func convertSet(_ file: URL, widths: [Int], sizes: String, settings: EncodeSettings,
+                outputFolder: URL?, overwrite: Bool) async -> (Outcome, String?) {
+    let inputSize = Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+    do {
+        let image = try ImageDecoder.decode(url: file)
+        let encoded = try await ResponsiveSet.encode(image, widths: widths, settings: settings)
+        let folder = outputFolder ?? file.deletingLastPathComponent()
+        let base = file.deletingPathExtension().lastPathComponent
+        var variants: [ResponsiveVariant] = []
+        var total: Int64 = 0
+        var parts: [String] = []
+        for result in encoded {
+            let destination = try write(result.data, base: ResponsiveSet.baseName(base, width: result.width),
+                                        format: settings.format, folder: folder, source: file, overwrite: overwrite)
+            variants.append(ResponsiveVariant(fileName: destination.lastPathComponent, width: result.width, height: result.height))
+            total += result.byteCount
+            parts.append("\(result.width)w \(bytes(result.byteCount))")
+        }
+        return (Outcome(name: file.lastPathComponent, input: inputSize, output: total,
+                        message: "\(bytes(inputSize)) → \(parts.joined(separator: " · "))"),
+                ResponsiveSet.snippet(variants, sizes: sizes))
+    } catch {
+        return (Outcome(name: file.lastPathComponent, input: inputSize, output: nil, message: error.localizedDescription), nil)
+    }
+}
+
 var totalIn: Int64 = 0, totalOut: Int64 = 0, failures = 0
 let limit = max(2, ProcessInfo.processInfo.activeProcessorCount / 2)
 let jobSettings = settings, jobFolder = outputFolder, jobOverwrite = overwrite
+
+if let setWidths {
+    // Progress goes to stderr so stdout is only the tags: `smol hero.png --srcset | pbcopy`.
+    let jobSizes = sizes
+    var tags: [String] = []
+    for file in files {
+        let (outcome, tag) = await convertSet(file, widths: setWidths, sizes: jobSizes, settings: jobSettings,
+                                              outputFolder: jobFolder, overwrite: jobOverwrite)
+        if let tag {
+            tags.append(tag)
+            FileHandle.standardError.write(Data("✓ \(outcome.name)  \(outcome.message)\n".utf8))
+        } else {
+            failures += 1
+            FileHandle.standardError.write(Data("✗ \(outcome.name)  \(outcome.message)\n".utf8))
+        }
+    }
+    if !tags.isEmpty { print(tags.joined(separator: "\n\n")) }
+    exit(failures == 0 ? 0 : 1)
+}
 
 await withTaskGroup(of: Outcome.self) { group in
     var pending = files.makeIterator()

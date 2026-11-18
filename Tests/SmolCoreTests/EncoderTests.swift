@@ -126,3 +126,98 @@ func qualityExtremesEncode(format: OutputFormat) async throws {
         #expect(encoded.data.count > 0)
     }
 }
+
+@Test func fitWithOneSideLimitsOnlyThatSide() {
+    #expect(ResizeOptions(mode: .fit, maxWidth: 1600, maxHeight: 0).targetSize(width: 3000, height: 6000) == (1600, 3200))
+    #expect(ResizeOptions(mode: .fit, maxWidth: 0, maxHeight: 900).targetSize(width: 3600, height: 1800) == (1800, 900))
+    #expect(ResizeOptions(mode: .fit, maxWidth: 0, maxHeight: 0).targetSize(width: 800, height: 600) == (800, 600))
+    // The same number on both sides caps the longest edge, portrait or landscape.
+    let edge = ResizeOptions(mode: .fit, maxWidth: 1000, maxHeight: 1000)
+    #expect(edge.targetSize(width: 2000, height: 4000) == (500, 1000))
+    #expect(edge.targetSize(width: 4000, height: 2000) == (1000, 500))
+    #expect(edge.targetSize(width: 640, height: 480) == (640, 480))
+}
+
+@Test func resizeSpecs() {
+    #expect(ResizeOptions(spec: "50%") == ResizeOptions(mode: .percent, percent: 50))
+    #expect(ResizeOptions(spec: "1920") == ResizeOptions(mode: .fit, maxWidth: 1920, maxHeight: 1920))
+    #expect(ResizeOptions(spec: "1920x1080") == ResizeOptions(mode: .fit, maxWidth: 1920, maxHeight: 1080))
+    #expect(ResizeOptions(spec: "1600x") == ResizeOptions(mode: .fit, maxWidth: 1600, maxHeight: 0))
+    #expect(ResizeOptions(spec: "X900") == ResizeOptions(mode: .fit, maxWidth: 0, maxHeight: 900))
+    for bad in ["", "x", "0", "-5", "0%", "wide", "10x20x30", "1920xtall"] {
+        #expect(ResizeOptions(spec: bad) == nil, "\(bad)")
+    }
+    #expect(ResizeOptions(spec: "1600x")?.allowUpscale == false)
+}
+
+@Test func resizeSummaries() {
+    #expect(ResizeOptions(mode: .fit, maxWidth: 1600, maxHeight: 0).summary == "fit 1600 wide")
+    #expect(ResizeOptions(mode: .fit, maxWidth: 0, maxHeight: 900).summary == "fit 900 tall")
+    #expect(ResizeOptions(mode: .fit, maxWidth: 1600, maxHeight: 900).summary == "fit 1600×900")
+}
+
+@Test func encoderAppliesWidthOnlyFitWithoutUpscaling() async throws {
+    let image = makeTestImage()
+    let smaller = try await ImageEncoder.encode(image, settings: EncodeSettings(
+        format: .jpeg, resize: ResizeOptions(mode: .fit, maxWidth: 150, maxHeight: 0)))
+    #expect(smaller.width == 150 && smaller.height == 100)
+    let untouched = try await ImageEncoder.encode(image, settings: EncodeSettings(
+        format: .jpeg, resize: ResizeOptions(mode: .fit, maxWidth: 4000, maxHeight: 0)))
+    #expect(untouched.width == 300 && untouched.height == 200)
+}
+
+@Test func responsiveWidthsParse() {
+    #expect(ResponsiveSet.parseWidths("640, 1280 1920") == [640, 1280, 1920])
+    #expect(ResponsiveSet.parseWidths("640w,1280W") == [640, 1280])
+    #expect(ResponsiveSet.parseWidths("") == nil)
+    #expect(ResponsiveSet.parseWidths("640, wide") == nil)
+    #expect(ResponsiveSet.parseWidths("0") == nil)
+    #expect(ResponsiveSet.parseWidths("640.5") == nil)
+}
+
+@Test func responsiveWidthsSkipAnythingWiderThanTheSource() {
+    #expect(ResponsiveSet.widths([640, 1280, 1920], sourceWidth: 3200) == [640, 1280, 1920])
+    #expect(ResponsiveSet.widths([1920, 640, 1280, 640], sourceWidth: 1500) == [640, 1280])
+    #expect(ResponsiveSet.widths([640, 1280], sourceWidth: 1280) == [640, 1280])
+    #expect(ResponsiveSet.widths([640, 1280, 1920], sourceWidth: 500) == [500])
+    #expect(ResponsiveSet.widths([640], sourceWidth: 0) == [])
+}
+
+@Test func responsiveSnippet() {
+    let variants = [
+        ResponsiveVariant(fileName: "hero-1280w.webp", width: 1280, height: 800),
+        ResponsiveVariant(fileName: "hero-640w.webp", width: 640, height: 400),
+    ]
+    let expected = """
+    <img src="hero-1280w.webp"
+         srcset="hero-640w.webp 640w, hero-1280w.webp 1280w"
+         sizes="100vw" width="1280" height="800" alt="">
+    """
+    #expect(ResponsiveSet.snippet(variants) == expected)
+    #expect(ResponsiveSet.snippet([]) == "")
+    #expect(ResponsiveSet.baseName("hero", width: 640) == "hero-640w")
+}
+
+@Test func responsiveSnippetEscapesNamesAndAttributes() {
+    let tag = ResponsiveSet.snippet(
+        [ResponsiveVariant(fileName: "team photo, 2-640w.avif", width: 640, height: 480)],
+        sizes: "(min-width: 60em) 50vw, 100vw", alt: "Tom & \"Jerry\"", pathPrefix: "images/")
+    #expect(tag.contains("src=\"images/team%20photo%2C%202-640w.avif\""))
+    #expect(tag.contains("srcset=\"images/team%20photo%2C%202-640w.avif 640w\""))
+    #expect(tag.contains("sizes=\"(min-width: 60em) 50vw, 100vw\""))
+    #expect(tag.contains("alt=\"Tom &amp; &quot;Jerry&quot;\""))
+}
+
+@Test func responsiveSetEncodesEachWidthThatFits() async throws {
+    let image = makeTestImage(width: 600, height: 400)
+    let settings = EncodeSettings(format: .jpeg, quality: 60, resize: ResizeOptions(mode: .percent, percent: 10))
+    let results = try await ResponsiveSet.encode(image, widths: [900, 300, 150], settings: settings)
+    #expect(results.map(\.width) == [150, 300])
+    #expect(results.map(\.height) == [100, 200])
+    for result in results {
+        let decoded = try ImageDecoder.decode(data: result.data)
+        #expect(decoded.width == result.width && decoded.height == result.height)
+    }
+    let small = try await ResponsiveSet.encode(image, widths: [1280, 1920], settings: settings)
+    #expect(small.map(\.width) == [600])
+}

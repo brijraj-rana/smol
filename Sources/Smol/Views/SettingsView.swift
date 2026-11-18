@@ -32,6 +32,26 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            section("Responsive set") {
+                VStack(spacing: 0) {
+                    row("Widths") {
+                        TextField("640, 1280, 1920", text: $model.preferences.responsiveWidths)
+                            .textFieldStyle(.plain)
+                            .font(.dsMono)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 200)
+                            .padding(.horizontal, 8)
+                            .frame(height: 26)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(DS.fill))
+                    }
+                }
+                .dsCard(padding: 0)
+                Text(responsiveExample)
+                    .font(.dsCaption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             section("Appearance") {
                 Segmented(options: Preferences.Appearance.allCases, selection: $model.preferences.appearance, title: \.title)
             }
@@ -55,6 +75,14 @@ struct SettingsView: View {
         .padding(24)
         .frame(width: 480)
         .background(DS.canvas)
+    }
+
+    private var responsiveExample: String {
+        guard let widths = ResponsiveSet.parseWidths(model.preferences.responsiveWidths) else {
+            return "Type widths in pixels, separated by commas."
+        }
+        let name = ResponsiveSet.baseName("photo\(model.preferences.cleanSuffix)", width: widths.sorted()[0])
+        return "Example: \(name).\(model.settings.format.fileExtension). Widths larger than the image are skipped."
     }
 
     private func toolTitle(_ tool: ExternalTool) -> String {
