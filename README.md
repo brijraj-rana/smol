@@ -41,6 +41,18 @@
 
 ## Install
 
+### Download
+
+Get `Smol-x.y.z.dmg` from the [latest release](https://github.com/BRIJRAJ-02/smol/releases/latest), open it and drag Smol to Applications. It runs on Apple Silicon and Intel, macOS 14 or later.
+
+The app is not notarized, so macOS blocks the first launch. Either allow it under System Settings → Privacy & Security → Open Anyway, or run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Smol.app
+```
+
+### Build from source
+
 Requires macOS 14 or later and Xcode 16 or later (for the Swift toolchain).
 
 ```bash

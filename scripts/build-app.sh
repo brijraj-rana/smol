@@ -2,14 +2,19 @@
 # Builds build/Smol.app.
 #   --open      launch it afterwards
 #   --install   copy it to /Applications and link the CLI as /usr/local/bin/smol (or ~/.local/bin/smol)
+#   --dmg       also write build/Smol-<version>.dmg, a universal build for sharing
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 [ -f Resources/AppIcon.icns ] || swift scripts/make-icon.swift "$PWD"
 
-swift build -c release
-BIN_DIR="$(swift build -c release --show-bin-path)"
+ARCHS=()
+case " $* " in *" --dmg "*) ARCHS=(--arch arm64 --arch x86_64) ;; esac
+
+swift build -c release ${ARCHS[@]+"${ARCHS[@]}"}
+BIN_DIR="$(swift build -c release ${ARCHS[@]+"${ARCHS[@]}"} --show-bin-path)"
 APP="build/Smol.app"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -34,5 +39,14 @@ for arg in "$@"; do
       done ;;
     --open)
       open "$APP" ;;
+    --dmg)
+      STAGE="$(mktemp -d)"
+      cp -R "$APP" "$STAGE/"
+      ln -s /Applications "$STAGE/Applications"
+      DMG="build/Smol-$VERSION.dmg"
+      rm -f "$DMG"
+      hdiutil create -volname Smol -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+      rm -rf "$STAGE"
+      echo "Wrote $DMG" ;;
   esac
 done
